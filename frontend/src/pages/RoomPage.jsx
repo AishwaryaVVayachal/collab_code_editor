@@ -5,7 +5,7 @@ import { io } from 'socket.io-client'
 import { useAuth } from '../context/AuthContext'
 import API from '../utils/api'
 
-const SOCKET_URL = 'http://localhost:5000'
+const SOCKET_URL = 'https://collab-code-editor-mnxl.onrender.com'
 
 const RoomPage = () => {
   const { roomId } = useParams()
