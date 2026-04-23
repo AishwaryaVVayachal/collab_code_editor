@@ -12,7 +12,12 @@ const app = express()
 const httpServer = http.createServer(app)
 
 const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
+  cors: { origin: '*', methods: ['GET', 'POST', 'DELETE'] },
+  // Fix for college/restricted WiFi: websocket first, auto-fallback to polling
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 })
 
 app.use(cors())
@@ -21,100 +26,98 @@ app.use(express.json())
 app.use('/api/auth', require('./routes/auth'))
 app.use('/api/rooms', require('./routes/rooms'))
 app.use('/api/versions', require('./routes/versions'))
-app.use('/api/run', require('./routes/run'))
 
+// roomId -> { socketId: { socketId, userId, username, color } }
 const roomUsers = {}
+
+function generateUserColor(userId) {
+  const colors = ['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7',
+    '#DDA0DD','#98D8C8','#F7DC6F','#BB8FCE','#85C1E9','#82E0AA','#F8C471']
+  if (!userId) return colors[0]
+  let hash = 0
+  for (let i = 0; i < userId.length; i++) hash = userId.charCodeAt(i) + ((hash << 5) - hash)
+  return colors[Math.abs(hash) % colors.length]
+}
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id)
 
-  socket.on('join-room', async ({ roomId, userId, userName }) => {
+  socket.on('join-room', async ({ roomId, userId, username }) => {
     socket.join(roomId)
+    socket.roomId = roomId
+    socket.userId = userId
+    socket.username = username
 
-    if (!roomUsers[roomId]) roomUsers[roomId] = []
-
-    const exists = roomUsers[roomId].some(
-      (u) => String(u.userId) === String(userId)
-    )
-
-    if (!exists) {
-      roomUsers[roomId].push({
-        socketId: socket.id,
-        userId,
-        userName
-      })
+    if (!roomUsers[roomId]) roomUsers[roomId] = {}
+    roomUsers[roomId][socket.id] = {
+      socketId: socket.id, userId, username,
+      color: generateUserColor(userId)
     }
 
-    io.to(roomId).emit('room-users', roomUsers[roomId])
-
-    try {
-      const Room = require('./models/Room')
-      const room = await Room.findOne({ roomId })
-
-      if (room) {
-        socket.emit('load-code', {
-          code: room.currentCode || '',
-          language: room.language || 'javascript'
-        })
-      } else {
-        socket.emit('load-code', {
-          code: '',
-          language: 'javascript'
-        })
-      }
-    } catch (err) {
-      console.error('Error loading room:', err.message)
+    const Room = require('./models/Room')
+    const room = await Room.findOne({ roomId }).populate('owner', 'name _id')
+    if (room) {
       socket.emit('load-code', {
-        code: '',
-        language: 'javascript'
+        code: room.currentCode,
+        language: room.language,
+        ownerId: room.owner?._id?.toString()
       })
     }
+    io.to(roomId).emit('room-users', Object.values(roomUsers[roomId]))
   })
 
   socket.on('code-change', async ({ roomId, code }) => {
     socket.to(roomId).emit('code-update', code)
-
-    try {
-      const Room = require('./models/Room')
-      await Room.findOneAndUpdate({ roomId }, { currentCode: code })
-    } catch (err) {
-      console.error('Error updating code:', err.message)
-    }
+    const Room = require('./models/Room')
+    await Room.findOneAndUpdate({ roomId }, { currentCode: code })
   })
 
-  socket.on('language-change', async ({ roomId, language }) => {
-    socket.to(roomId).emit('language-update', language)
-
-    try {
-      const Room = require('./models/Room')
-      await Room.findOneAndUpdate({ roomId }, { language })
-    } catch (err) {
-      console.error('Error updating language:', err.message)
-    }
+  socket.on('language-change', ({ roomId, language }) => {
+    io.to(roomId).emit('language-update', language)
+    const Room = require('./models/Room')
+    Room.findOneAndUpdate({ roomId }, { language }).exec()
   })
 
-  socket.on('run-output', ({ roomId, output }) => {
-    io.to(roomId).emit('run-output', output)
+  socket.on('kick-user', async ({ roomId, targetSocketId, requesterId }) => {
+    const Room = require('./models/Room')
+    const room = await Room.findOne({ roomId })
+    if (!room || room.owner?.toString() !== requesterId) return
+    const target = io.sockets.sockets.get(targetSocketId)
+    if (target) {
+      target.emit('kicked', { message: 'You have been removed from the room by the owner.' })
+      target.leave(roomId)
+    }
+    if (roomUsers[roomId]) delete roomUsers[roomId][targetSocketId]
+    io.to(roomId).emit('room-users', Object.values(roomUsers[roomId] || {}))
+  })
+
+  socket.on('clear-code', async ({ roomId, requesterId }) => {
+    const Room = require('./models/Room')
+    const room = await Room.findOne({ roomId })
+    if (!room || room.owner?.toString() !== requesterId) return
+    const cleared = '// Code cleared by room owner\n'
+    await Room.findOneAndUpdate({ roomId }, { currentCode: cleared })
+    io.to(roomId).emit('code-update', cleared)
+  })
+
+  socket.on('delete-room', async ({ roomId, requesterId }) => {
+    const Room = require('./models/Room')
+    const room = await Room.findOne({ roomId })
+    if (!room || room.owner?.toString() !== requesterId) return
+    io.to(roomId).emit('room-deleted', { message: 'Room deleted by the owner.' })
+    await Room.findOneAndDelete({ roomId })
+    if (roomUsers[roomId]) delete roomUsers[roomId]
   })
 
   socket.on('disconnect', () => {
-    for (const roomId in roomUsers) {
-      roomUsers[roomId] = roomUsers[roomId].filter(
-        (u) => u.socketId !== socket.id
-      )
-
-      io.to(roomId).emit('room-users', roomUsers[roomId])
-
-      if (roomUsers[roomId].length === 0) {
-        delete roomUsers[roomId]
-      }
+    const { roomId } = socket
+    if (roomId && roomUsers[roomId]) {
+      delete roomUsers[roomId][socket.id]
+      io.to(roomId).emit('room-users', Object.values(roomUsers[roomId]))
     }
-
     console.log('User disconnected:', socket.id)
   })
 })
 
 const PORT = process.env.PORT || 5000
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-})
+httpServer.listen(PORT, () => console.log(`Server running on port ${PORT}`))
