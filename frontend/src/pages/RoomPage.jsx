@@ -1,320 +1,334 @@
-import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import Editor from '@monaco-editor/react'
 import { io } from 'socket.io-client'
 import { useAuth } from '../context/AuthContext'
 import API from '../utils/api'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://collab-code-editor-mnxl.onrender.com'
+
+const LANG_META = {
+  javascript: { icon: '🟨', label: 'JavaScript' },
+  typescript: { icon: '🔷', label: 'TypeScript' },
+  python: { icon: '🐍', label: 'Python' },
+  cpp: { icon: '⚡', label: 'C++' },
+  java: { icon: '☕', label: 'Java' },
+  rust: { icon: '🦀', label: 'Rust' },
+  go: { icon: '🐹', label: 'Go' },
+  html: { icon: '🌐', label: 'HTML' },
+  css: { icon: '🎨', label: 'CSS' },
+}
+
+function UserAvatar({ user, size = 28 }) {
+  const [tip, setTip] = useState(false)
+  return (
+    <div style={{ position: 'relative' }}
+      onMouseEnter={() => setTip(true)} onMouseLeave={() => setTip(false)}>
+      <div style={{
+        width: size, height: size, borderRadius: '50%', background: user.color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: size * 0.42, fontWeight: 700, color: '#111',
+        border: '2px solid rgba(255,255,255,0.12)', cursor: 'default',
+        boxShadow: `0 0 0 2px ${user.color}44`, flexShrink: 0,
+        userSelect: 'none'
+      }}>
+        {(user.username || '?')[0].toUpperCase()}
+      </div>
+      {tip && (
+        <div style={{
+          position: 'absolute', bottom: '110%', left: '50%', transform: 'translateX(-50%)',
+          background: '#1a1a2e', color: '#e2e8f0', padding: '3px 10px',
+          borderRadius: 4, fontSize: 11, whiteSpace: 'nowrap',
+          border: '1px solid rgba(255,255,255,0.1)', zIndex: 9999, pointerEvents: 'none',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+        }}>{user.username}</div>
+      )}
+    </div>
+  )
+}
+
+function Toast({ msg, type }) {
+  const bg = type === 'error' ? '#c0392b' : type === 'success' ? '#27ae60' : '#2475b0'
+  return (
+    <div style={{
+      position: 'fixed', top: 44, left: '50%', transform: 'translateX(-50%)',
+      zIndex: 10000, padding: '9px 22px', borderRadius: 6, background: bg,
+      color: '#fff', fontSize: 13, boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
+      animation: 'toastIn 0.2s ease', pointerEvents: 'none'
+    }}>{msg}</div>
+  )
+}
+
+function SidePanel({ show, title, onClose, children }) {
+  if (!show) return null
+  return (
+    <div style={{
+      width: 270, background: '#252526', borderLeft: '1px solid #3d3d3d',
+      display: 'flex', flexDirection: 'column', flexShrink: 0
+    }}>
+      <div style={{
+        height: 35, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 12px', background: '#2d2d30', borderBottom: '1px solid #3d3d3d'
+      }}>
+        <span style={{ fontSize: 11, color: '#bbb', fontWeight: 600, letterSpacing: 0.8, textTransform: 'uppercase' }}>{title}</span>
+        <button onClick={onClose} style={{
+          background: 'none', border: 'none', color: '#666', cursor: 'pointer',
+          fontSize: 18, lineHeight: 1, padding: '1px 4px'
+        }}>×</button>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '10px 10px' }}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function TBtn({ onClick, icon, label, active, danger, disabled }) {
+  const [hov, setHov] = useState(false)
+  return (
+    <button onClick={onClick} disabled={disabled}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      title={disabled ? 'Owner only' : label}
+      style={{
+        background: active ? 'rgba(0,122,204,0.18)' : hov ? 'rgba(255,255,255,0.06)' : 'transparent',
+        border: `1px solid ${active ? '#007acc88' : hov ? '#555' : '#3d3d3d'}`,
+        color: disabled ? '#444' : danger ? (hov ? '#f87171' : '#c0392b88') : active ? '#4da6ff' : hov ? '#ccc' : '#888',
+        padding: '3px 11px', borderRadius: 4, cursor: disabled ? 'not-allowed' : 'pointer',
+        fontSize: 12, display: 'flex', alignItems: 'center', gap: 5, transition: 'all 0.15s',
+        flexShrink: 0
+      }}>
+      <span style={{ fontSize: 13 }}>{icon}</span>
+      <span>{label}</span>
+    </button>
+  )
+}
 
 const RoomPage = () => {
   const { roomId } = useParams()
   const { user } = useAuth()
+  const navigate = useNavigate()
 
   const [code, setCode] = useState('// Loading...')
   const [language, setLanguage] = useState('javascript')
   const [versions, setVersions] = useState([])
   const [versionMsg, setVersionMsg] = useState('')
-  const [showVersions, setShowVersions] = useState(false)
-  const [output, setOutput] = useState('')
-  const [isRunning, setIsRunning] = useState(false)
+  const [panel, setPanel] = useState('users') // 'users' | 'versions' | null
   const [roomUsers, setRoomUsers] = useState([])
+  const [isOwner, setIsOwner] = useState(false)
+  const [ownerId, setOwnerId] = useState(null)
+  const [connStatus, setConnStatus] = useState('connecting')
+  const [toast, setToast] = useState(null)
+  const [copied, setCopied] = useState(false)
+  const [roomName, setRoomName] = useState('')
 
   const socketRef = useRef(null)
   const codeRef = useRef(code)
 
-  const myUserId = user?.id || user?._id || 'unknown'
-  const myName = user?.name || user?.email || 'Anonymous'
+  const notify = (msg, type = 'info') => {
+    setToast({ msg, type })
+    setTimeout(() => setToast(null), 3000)
+  }
 
   useEffect(() => {
-    socketRef.current = io(SOCKET_URL)
-
-    socketRef.current.emit('join-room', {
-      roomId,
-      userId: myUserId,
-      userName: myName
+    // WiFi fix: websocket first, auto polling fallback
+    socketRef.current = io(SOCKET_URL, {
+      transports: ['websocket', 'polling'],
+      timeout: 20000,
+      reconnectionAttempts: 6,
+      reconnectionDelay: 1500
     })
+    const s = socketRef.current
 
-    socketRef.current.on('load-code', ({ code, language }) => {
-      setCode(code || '')
-      setLanguage(language || 'javascript')
-      codeRef.current = code || ''
+    s.on('connect', () => setConnStatus('connected'))
+    s.on('disconnect', () => setConnStatus('disconnected'))
+    s.on('connect_error', () => setConnStatus('reconnecting…'))
+
+    s.emit('join-room', { roomId, userId: user?.id, username: user?.name })
+
+    s.on('load-code', ({ code: c, language: l, ownerId: o }) => {
+      setCode(c); codeRef.current = c; setLanguage(l)
+      setOwnerId(o); setIsOwner(user?.id === o)
     })
+    s.on('code-update', c => { setCode(c); codeRef.current = c })
+    s.on('language-update', l => setLanguage(l))
+    s.on('room-users', u => setRoomUsers(u))
+    s.on('kicked', ({ message }) => { notify(message, 'error'); setTimeout(() => navigate('/dashboard'), 2000) })
+    s.on('room-deleted', ({ message }) => { notify(message, 'error'); setTimeout(() => navigate('/dashboard'), 2500) })
 
-    socketRef.current.on('code-update', (newCode) => {
-      setCode(newCode || '')
-      codeRef.current = newCode || ''
-    })
+    API.get(`/rooms/${roomId}`).then(r => setRoomName(r.data.name || roomId)).catch(() => {})
 
-    socketRef.current.on('language-update', (lang) => {
-      setLanguage(lang || 'javascript')
-    })
+    return () => s.disconnect()
+  }, [roomId, user?.id])
 
-    socketRef.current.on('room-users', (users) => {
-      setRoomUsers(users || [])
-    })
+  const handleCodeChange = useCallback(v => {
+    setCode(v); codeRef.current = v
+    socketRef.current?.emit('code-change', { roomId, code: v })
+  }, [roomId])
 
-    socketRef.current.on('run-output', (out) => {
-      setOutput(out || 'No output')
-      setIsRunning(false)
-    })
-
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect()
-      }
-    }
-  }, [roomId, myUserId, myName])
-
-  const handleCodeChange = (value = '') => {
-    setCode(value)
-    codeRef.current = value
-    if (socketRef.current) {
-      socketRef.current.emit('code-change', { roomId, code: value })
-    }
-  }
-
-  const handleLanguageChange = (e) => {
-    const lang = e.target.value
-    setLanguage(lang)
-    if (socketRef.current) {
-      socketRef.current.emit('language-change', { roomId, language: lang })
-    }
-  }
-
-  const runCode = async () => {
-    try {
-      setIsRunning(true)
-      setOutput('⏳ Running...')
-
-      const res = await API.post('/run', {
-        code: codeRef.current,
-        language
-      })
-
-      const result =
-        res.data.run?.stdout ||
-        res.data.run?.output ||
-        res.data.run?.stderr ||
-        res.data.compile?.stderr ||
-        'No output'
-
-      if (socketRef.current) {
-        socketRef.current.emit('run-output', { roomId, output: result })
-      }
-
-      setOutput(result)
-    } catch (err) {
-      const errMsg =
-        err.response?.data?.message || `Error: ${err.message}`
-
-      if (socketRef.current) {
-        socketRef.current.emit('run-output', { roomId, output: errMsg })
-      }
-
-      setOutput(errMsg)
-    } finally {
-      setIsRunning(false)
-    }
+  const handleLangChange = l => {
+    setLanguage(l)
+    socketRef.current?.emit('language-change', { roomId, language: l })
   }
 
   const saveVersion = async () => {
     try {
-      await API.post('/versions/save', {
-        roomId,
-        code: codeRef.current,
-        message: versionMsg || 'No message'
-      })
-      setVersionMsg('')
-      alert('Version saved!')
-    } catch (err) {
-      alert('Failed to save version')
-    }
+      await API.post('/versions/save', { roomId, code: codeRef.current, message: versionMsg || 'Snapshot' })
+      setVersionMsg(''); notify('Version saved!', 'success')
+    } catch { notify('Failed to save', 'error') }
   }
 
   const fetchVersions = async () => {
     try {
-      const res = await API.get(`/versions/${roomId}`)
-      setVersions(res.data || [])
-      setShowVersions(true)
-    } catch (err) {
-      alert('Failed to fetch versions')
-    }
+      const r = await API.get(`/versions/${roomId}`)
+      setVersions(r.data); setPanel('versions')
+    } catch { notify('Failed to load history', 'error') }
   }
 
-  const restoreVersion = async (versionId) => {
+  const restoreVersion = async id => {
     try {
-      const res = await API.post('/versions/restore', { roomId, versionId })
-      setCode(res.data.code || '')
-      codeRef.current = res.data.code || ''
-
-      if (socketRef.current) {
-        socketRef.current.emit('code-change', {
-          roomId,
-          code: res.data.code || ''
-        })
-      }
-
-      alert('Version restored!')
-    } catch (err) {
-      alert('Failed to restore version')
-    }
+      const r = await API.post('/versions/restore', { roomId, versionId: id })
+      setCode(r.data.code); codeRef.current = r.data.code
+      socketRef.current?.emit('code-change', { roomId, code: r.data.code })
+      notify('Restored!', 'success')
+    } catch { notify('Failed to restore', 'error') }
   }
+
+  const kickUser = (socketId, name) => {
+    if (!isOwner) return
+    if (!confirm(`Remove "${name}" from the room?`)) return
+    socketRef.current?.emit('kick-user', { roomId, targetSocketId: socketId, requesterId: user?.id })
+    notify(`${name} removed`, 'info')
+  }
+
+  const clearCode = () => {
+    if (!isOwner || !confirm('Clear all code for everyone? This cannot be undone.')) return
+    socketRef.current?.emit('clear-code', { roomId, requesterId: user?.id })
+  }
+
+  const deleteRoom = () => {
+    if (!isOwner || !confirm('Permanently delete this room?')) return
+    socketRef.current?.emit('delete-room', { roomId, requesterId: user?.id })
+    navigate('/dashboard')
+  }
+
+  const copyId = () => {
+    navigator.clipboard.writeText(roomId)
+    setCopied(true); setTimeout(() => setCopied(false), 2000)
+  }
+
+  const togglePanel = p => setPanel(prev => prev === p ? null : p)
+  const connColor = { connected: '#4ade80', disconnected: '#f87171', 'reconnecting…': '#fbbf24', connecting: '#fbbf24' }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100vh',
-        background: '#1e1e1e',
-        color: '#fff'
-      }}
-    >
-      <div
-        style={{
-          padding: '8px 16px',
-          background: '#252526',
-          borderBottom: '1px solid #3c3c3c',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-          flexWrap: 'wrap'
-        }}
-      >
-        <span style={{ fontWeight: 600, color: '#569cd6' }}>
-          Room: {roomId}
-        </span>
+    <div style={{
+      display: 'flex', flexDirection: 'column', height: '100vh',
+      background: '#1e1e1e', color: '#d4d4d4',
+      fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", overflow: 'hidden'
+    }}>
+      {toast && <Toast msg={toast.msg} type={toast.type} />}
 
-        <div
-          style={{
-            background: '#0e639c',
-            borderRadius: '4px',
-            padding: '3px 10px',
-            fontSize: '12px',
-            display: 'flex',
-            gap: '6px',
-            alignItems: 'center'
-          }}
-        >
-          <span>👤 {myName}</span>
-          <span
-            style={{
-              color: '#9cdcfe',
-              fontFamily: 'monospace',
-              fontSize: '10px',
-              opacity: 0.8
-            }}
-          >
-            #{String(myUserId).slice(-6)}
-          </span>
+      {/* === TITLE BAR === */}
+      <div style={{
+        height: 33, background: '#323233', borderBottom: '1px solid #252526',
+        display: 'flex', alignItems: 'center', padding: '0 14px',
+        justifyContent: 'space-between', flexShrink: 0, userSelect: 'none'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{
+            fontSize: 13, fontWeight: 700, letterSpacing: -0.3,
+            background: 'linear-gradient(90deg, #00c6ff, #7c3aed)',
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent'
+          }}>⚡ CollabCode</span>
+          <span style={{ color: '#4a4a4a' }}>›</span>
+          <span style={{ fontSize: 13, color: '#ccc' }}>{roomName || roomId}</span>
+          {isOwner && (
+            <span style={{
+              fontSize: 10, padding: '1px 7px', borderRadius: 3,
+              background: 'rgba(251,191,36,0.12)', border: '1px solid rgba(251,191,36,0.35)',
+              color: '#fbbf24'
+            }}>👑 Owner</span>
+          )}
         </div>
 
-        {roomUsers.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '11px', color: '#9cdcfe' }}>In room:</span>
-            {roomUsers.map((u, i) => (
-              <span
-                key={i}
-                style={{
-                  background:
-                    String(u.userId) === String(myUserId) ? '#267f99' : '#333',
-                  borderRadius: '12px',
-                  padding: '2px 8px',
-                  fontSize: '11px',
-                  border:
-                    String(u.userId) === String(myUserId)
-                      ? '1px solid #569cd6'
-                      : '1px solid #555'
-                }}
-              >
-                {u.userName}
-                {String(u.userId) === String(myUserId) && ' (you)'}
-              </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Stacked avatars */}
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            {roomUsers.slice(0, 6).map((u, i) => (
+              <div key={u.socketId} style={{ marginLeft: i > 0 ? -8 : 0, zIndex: 10 - i }}>
+                <UserAvatar user={u} size={22} />
+              </div>
             ))}
+            {roomUsers.length > 6 && (
+              <div style={{
+                width: 22, height: 22, borderRadius: '50%', background: '#3d3d3d',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 9, color: '#888', marginLeft: -8, border: '2px solid #323233'
+              }}>+{roomUsers.length - 6}</div>
+            )}
           </div>
-        )}
 
-        <select
-          value={language}
-          onChange={handleLanguageChange}
-          style={{
-            padding: '4px 8px',
-            background: '#3c3c3c',
-            color: '#fff',
-            border: '1px solid #555',
-            borderRadius: '4px'
-          }}
-        >
-          <option value="javascript">JavaScript</option>
-          <option value="python">Python</option>
-          <option value="cpp">C++</option>
-          <option value="java">Java</option>
-          <option value="typescript">TypeScript</option>
-        </select>
-
-        <button
-          onClick={runCode}
-          disabled={isRunning}
-          style={{
-            padding: '5px 18px',
-            background: isRunning ? '#555' : '#4CAF50',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: isRunning ? 'not-allowed' : 'pointer',
-            fontWeight: 700,
-            fontSize: '13px'
-          }}
-        >
-          {isRunning ? '⏳ Running…' : '▶ Run'}
-        </button>
-
-        <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
-          <input
-            placeholder="Version message"
-            value={versionMsg}
-            onChange={(e) => setVersionMsg(e.target.value)}
-            style={{
-              padding: '4px 8px',
-              background: '#3c3c3c',
-              color: '#fff',
-              border: '1px solid #555',
-              borderRadius: '4px',
-              width: '160px'
-            }}
-          />
-          <button
-            onClick={saveVersion}
-            style={{
-              padding: '4px 10px',
-              background: '#3c3c3c',
-              color: '#fff',
-              border: '1px solid #555',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            💾 Save
+          <button onClick={copyId} style={{
+            background: copied ? '#27ae6022' : '#2d2d2d', border: `1px solid ${copied ? '#27ae60' : '#4a4a4a'}`,
+            color: copied ? '#4ade80' : '#888', padding: '2px 10px',
+            borderRadius: 4, cursor: 'pointer', fontSize: 11, transition: 'all 0.2s'
+          }}>
+            {copied ? '✓ Copied!' : `🔑 ${roomId}`}
           </button>
-          <button
-            onClick={fetchVersions}
-            style={{
-              padding: '4px 10px',
-              background: '#3c3c3c',
-              color: '#fff',
-              border: '1px solid #555',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            🕐 History
-          </button>
+
+          <button onClick={() => navigate('/dashboard')} style={{
+            background: 'none', border: '1px solid #3d3d3d', color: '#777',
+            padding: '2px 9px', borderRadius: 4, cursor: 'pointer', fontSize: 11
+          }}>← Back</button>
         </div>
       </div>
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ flex: 1 }}>
+      {/* === TOOLBAR === */}
+      <div style={{
+        height: 38, background: '#2d2d30', borderBottom: '1px solid #3d3d3d',
+        display: 'flex', alignItems: 'center', padding: '0 12px', gap: 8,
+        flexShrink: 0, overflowX: 'auto'
+      }}>
+        {/* Language */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingRight: 10, borderRight: '1px solid #3d3d3d' }}>
+          <span style={{ fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>Lang</span>
+          <select value={language} onChange={e => handleLangChange(e.target.value)} style={{
+            background: '#3c3c3c', border: '1px solid #555', color: '#d4d4d4',
+            padding: '3px 8px', borderRadius: 4, fontSize: 12, cursor: 'pointer', outline: 'none'
+          }}>
+            {Object.entries(LANG_META).map(([k, v]) => (
+              <option key={k} value={k}>{v.icon} {v.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Save version */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingRight: 10, borderRight: '1px solid #3d3d3d' }}>
+          <input value={versionMsg} onChange={e => setVersionMsg(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && saveVersion()}
+            placeholder="Snapshot message…"
+            style={{
+              background: '#3c3c3c', border: '1px solid #4a4a4a', color: '#d4d4d4',
+              padding: '3px 10px', borderRadius: 4, fontSize: 12, width: 175, outline: 'none'
+            }} />
+          <TBtn onClick={saveVersion} icon="💾" label="Save" />
+        </div>
+
+        <TBtn onClick={fetchVersions} icon="🕐" label="History" active={panel === 'versions'} />
+        <TBtn onClick={() => togglePanel('users')} icon="👥"
+          label={`Users (${roomUsers.length})`} active={panel === 'users'} />
+
+        {/* Owner controls */}
+        {isOwner && <>
+          <div style={{ width: 1, background: '#3d3d3d', height: 20, marginLeft: 4 }} />
+          <TBtn onClick={clearCode} icon="🗑️" label="Clear Code" danger />
+          <TBtn onClick={deleteRoom} icon="💥" label="Delete Room" danger />
+        </>}
+      </div>
+
+      {/* === MAIN === */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* Editor */}
+        <div style={{ flex: 1, overflow: 'hidden' }}>
           <Editor
             height="100%"
             language={language}
@@ -323,149 +337,108 @@ const RoomPage = () => {
             onChange={handleCodeChange}
             options={{
               fontSize: 14,
-              minimap: { enabled: false },
-              automaticLayout: true
+              fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+              fontLigatures: true,
+              minimap: { enabled: true },
+              scrollBeyondLastLine: false,
+              smoothScrolling: true,
+              cursorSmoothCaretAnimation: 'on',
+              renderLineHighlight: 'all',
+              bracketPairColorization: { enabled: true },
+              padding: { top: 10 },
+              lineHeight: 22,
+              letterSpacing: 0.3,
+              wordWrap: 'on',
             }}
           />
         </div>
 
-        <div
-          style={{
-            height: '200px',
-            background: '#0d0d0d',
-            borderTop: '2px solid #3c3c3c',
-            display: 'flex',
-            flexDirection: 'column'
-          }}
-        >
-          <div
-            style={{
-              padding: '4px 12px',
-              background: '#252526',
-              borderBottom: '1px solid #3c3c3c',
-              fontSize: '11px',
-              color: '#9cdcfe',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              fontWeight: 600
-            }}
-          >
-            <span>OUTPUT</span>
-            <button
-              onClick={() => setOutput('')}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#888',
-                cursor: 'pointer',
-                fontSize: '11px'
-              }}
-            >
-              Clear
-            </button>
-          </div>
+        {/* === USERS PANEL === */}
+        <SidePanel show={panel === 'users'} title="Collaborators" onClose={() => setPanel(null)}>
+          {roomUsers.length === 0
+            ? <div style={{ color: '#444', fontSize: 12, textAlign: 'center', marginTop: 30 }}>No users connected</div>
+            : roomUsers.map(u => (
+              <div key={u.socketId} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
+                borderRadius: 6, marginBottom: 6,
+                background: u.userId === user?.id ? 'rgba(0,122,204,0.08)' : '#2d2d30',
+                border: `1px solid ${u.userId === user?.id ? 'rgba(0,122,204,0.25)' : '#3a3a3a'}`
+              }}>
+                <UserAvatar user={u} size={34} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: '#d4d4d4', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    {u.username}
+                    {u.userId === user?.id && <span style={{ color: '#555', fontSize: 10 }}>(you)</span>}
+                    {u.userId === ownerId && <span style={{ fontSize: 12 }}>👑</span>}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
+                    <span style={{ fontSize: 10, color: '#555' }}>online</span>
+                  </div>
+                </div>
+                {isOwner && u.userId !== user?.id && (
+                  <button onClick={() => kickUser(u.socketId, u.username)} style={{
+                    background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)',
+                    color: '#f87171', padding: '2px 9px', borderRadius: 4,
+                    cursor: 'pointer', fontSize: 10, flexShrink: 0
+                  }}>Kick</button>
+                )}
+              </div>
+            ))
+          }
+        </SidePanel>
 
-          <pre
-            style={{
-              flex: 1,
-              margin: 0,
-              padding: '10px 14px',
-              fontFamily: '"Cascadia Code", "Fira Code", monospace',
-              fontSize: '13px',
-              color: output.startsWith('Error') ? '#f48771' : '#d4d4d4',
-              overflowY: 'auto',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word'
-            }}
-          >
-            {output || '// Click ▶ Run to execute the code. Output is shared with all users in the room.'}
-          </pre>
+        {/* === VERSIONS PANEL === */}
+        <SidePanel show={panel === 'versions'} title="Version History" onClose={() => setPanel(null)}>
+          {versions.length === 0
+            ? <div style={{ color: '#444', fontSize: 12, textAlign: 'center', marginTop: 30 }}>No saved versions yet.<br /><span style={{ color: '#333' }}>Use "Save" to snapshot your code.</span></div>
+            : versions.map(v => (
+              <div key={v._id} style={{
+                background: '#2d2d30', border: '1px solid #3a3a3a',
+                borderRadius: 6, padding: '10px 12px', marginBottom: 8
+              }}>
+                <div style={{ fontSize: 12, color: '#d4d4d4', fontWeight: 600, marginBottom: 4 }}>{v.message}</div>
+                <div style={{ fontSize: 10, color: '#555', marginBottom: 8 }}>
+                  {new Date(v.createdAt).toLocaleString()} · {v.savedBy?.name}
+                </div>
+                <button onClick={() => restoreVersion(v._id)} style={{
+                  width: '100%', background: 'rgba(0,122,204,0.12)',
+                  border: '1px solid rgba(0,122,204,0.3)', color: '#4da6ff',
+                  padding: '4px 0', borderRadius: 4, cursor: 'pointer', fontSize: 11
+                }}>↩ Restore this version</button>
+              </div>
+            ))
+          }
+        </SidePanel>
+      </div>
+
+      {/* === STATUS BAR === */}
+      <div style={{
+        height: 22, background: '#007acc', display: 'flex', alignItems: 'center',
+        justifyContent: 'space-between', padding: '0 14px', fontSize: 11,
+        color: '#fff', userSelect: 'none', flexShrink: 0
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ fontSize: 9, color: connColor[connStatus] || '#fbbf24' }}>●</span>
+            {connStatus}
+          </span>
+          <span>{(LANG_META[language]?.icon || '📄')} {language}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 12, opacity: 0.85 }}>
+          <span>👥 {roomUsers.length} online</span>
+          <span>Room: {roomId}</span>
         </div>
       </div>
 
-      {showVersions && (
-        <div
-          style={{
-            position: 'fixed',
-            right: 0,
-            top: 0,
-            width: '300px',
-            height: '100vh',
-            background: '#252526',
-            color: '#fff',
-            overflowY: 'auto',
-            padding: '16px',
-            borderLeft: '1px solid #3c3c3c',
-            zIndex: 100,
-            boxShadow: '-4px 0 12px rgba(0,0,0,0.4)'
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: '16px'
-            }}
-          >
-            <h3 style={{ margin: 0, fontSize: '14px' }}>VERSION HISTORY</h3>
-            <button
-              onClick={() => setShowVersions(false)}
-              style={{
-                background: 'none',
-                border: '1px solid #555',
-                color: '#fff',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-            >
-              ✕
-            </button>
-          </div>
-
-          {versions.length === 0 && (
-            <p style={{ color: '#888', fontSize: '13px' }}>No versions saved yet.</p>
-          )}
-
-          {versions.map((v) => (
-            <div
-              key={v._id}
-              style={{
-                borderBottom: '1px solid #3c3c3c',
-                marginBottom: '12px',
-                paddingBottom: '12px'
-              }}
-            >
-              <p style={{ margin: '0 0 4px', fontWeight: 600, fontSize: '13px' }}>
-                {v.message}
-              </p>
-              <small style={{ color: '#888' }}>
-                {new Date(v.createdAt || v.timestamp).toLocaleString()}
-              </small>
-              <br />
-              <small style={{ color: '#888' }}>By: {v.savedBy?.name}</small>
-              <br />
-              <button
-                onClick={() => restoreVersion(v._id)}
-                style={{
-                  marginTop: '8px',
-                  padding: '4px 12px',
-                  background: '#0e639c',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '12px'
-                }}
-              >
-                Restore
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      <style>{`
+        @keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(-10px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: #1e1e1e; }
+        ::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+        select option { background: #3c3c3c; color: #d4d4d4; }
+        input::placeholder { color: #555; }
+      `}</style>
     </div>
   )
 }
