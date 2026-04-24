@@ -31,7 +31,6 @@ const RegisterPage = () => {
     }}>
       <div style={{ width: '100%', maxWidth: 360, padding: '0 24px' }}>
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
-          <div style={{ fontSize: 44, marginBottom: 10 }}>⚡</div>
           <h1 style={{
             margin: 0, fontSize: 24, fontWeight: 700,
             background: 'linear-gradient(90deg, #00c6ff, #7c3aed)',
