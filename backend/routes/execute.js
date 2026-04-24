@@ -1,7 +1,6 @@
 const express = require('express')
 const router = express.Router()
 
-// Piston language map
 const PISTON_LANGS = {
   javascript: { language: 'javascript', version: '18.15.0' },
   typescript: { language: 'typescript', version: '5.0.3' },
@@ -14,11 +13,8 @@ const PISTON_LANGS = {
 
 router.post('/', async (req, res) => {
   const { code, language } = req.body
-
   const lang = PISTON_LANGS[language]
-  if (!lang) {
-    return res.status(400).json({ error: `Language "${language}" is not supported for execution.` })
-  }
+  if (!lang) return res.status(400).json({ error: `Language "${language}" not supported.` })
 
   try {
     const response = await fetch('https://emkc.org/api/v2/piston/execute', {
@@ -31,21 +27,15 @@ router.post('/', async (req, res) => {
         stdin: ''
       })
     })
-
-    const data = await response.json()
+    const text = await response.text()
+    console.log('Piston response:', text.substring(0, 300))
+    let data
+    try { data = JSON.parse(text) } catch { return res.status(500).json({ error: 'Piston invalid JSON: ' + text }) }
     const run = data?.run
-
-    if (!run) {
-      return res.status(500).json({ error: 'Code runner returned unexpected response.' })
-    }
-
-    return res.json({
-      output: run.output || run.stdout || '',
-      stderr: run.stderr || '',
-      exitCode: run.code
-    })
+    if (!run) return res.status(500).json({ error: 'No run field. Got: ' + JSON.stringify(data).substring(0, 200) })
+    return res.json({ output: run.output || run.stdout || '', stderr: run.stderr || '', exitCode: run.code ?? 0 })
   } catch (err) {
-    return res.status(500).json({ error: 'Failed to reach code runner: ' + err.message })
+    return res.status(500).json({ error: 'Piston fetch failed: ' + err.message })
   }
 })
 
