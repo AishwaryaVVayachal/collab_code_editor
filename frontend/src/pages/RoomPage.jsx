@@ -168,7 +168,13 @@ const RoomPage = () => {
     s.on('disconnect', () => setConnStatus('disconnected'))
     s.on('connect_error', () => setConnStatus('reconnecting…'))
 
-    s.emit('join-room', { roomId, userId: myUserId, username: myUsername })
+    // Wait a tick to ensure user is loaded from localStorage
+    setTimeout(() => {
+      const uid = user?.id || user?._id
+      const uname = user?.name
+      console.log('Joining room with:', { uid, uname })
+      s.emit('join-room', { roomId, userId: uid, username: uname })
+    }, 100)
 
     s.on('load-code', ({ code: c, language: l, ownerId: o }) => {
       setCode(c); codeRef.current = c; setLanguage(l)
@@ -187,7 +193,7 @@ const RoomPage = () => {
     console.log('User object:', user, 'myUserId:', myUserId)
 
     return () => s.disconnect()
-  }, [roomId, user?.id])
+  }, [roomId, myUserId])
 
   const handleCodeChange = useCallback(v => {
     setCode(v); codeRef.current = v
@@ -215,30 +221,25 @@ const RoomPage = () => {
     setOutputType('idle')
 
     try {
-      const res = await fetch('https://emkc.org/api/v2/piston/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          language: pistonLang.language,
-          version: pistonLang.version,
-          files: [{ content: codeRef.current }],
-          stdin: ''
-        })
+      // Call our own backend which proxies to Piston — avoids CORS issues
+      const res = await API.post('/execute', {
+        code: codeRef.current,
+        language
       })
-      const result = await res.json()
-      const run = result.run
-      if (run.stderr) {
-        setOutput(run.stderr)
+      const { output, stderr } = res.data
+      if (stderr && stderr.trim()) {
+        setOutput(stderr)
         setOutputType('error')
-      } else if (run.output) {
-        setOutput(run.output)
+      } else if (output && output.trim()) {
+        setOutput(output)
         setOutputType('success')
       } else {
         setOutput('(no output — did you forget console.log / print?)')
         setOutputType('success')
       }
     } catch (err) {
-      setOutput('Failed to connect to code runner. Check your internet.\nError: ' + err.message)
+      const msg = err.response?.data?.error || err.message
+      setOutput('Failed to run code: ' + msg)
       setOutputType('error')
     }
     setRunning(false)

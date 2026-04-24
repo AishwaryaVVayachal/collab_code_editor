@@ -24,6 +24,7 @@ app.use(cors())
 app.use(express.json())
 
 app.use('/api/auth', require('./routes/auth'))
+app.use('/api/execute', require('./routes/execute'))
 app.use('/api/rooms', require('./routes/rooms'))
 app.use('/api/versions', require('./routes/versions'))
 
