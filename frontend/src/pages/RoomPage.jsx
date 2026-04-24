@@ -7,6 +7,19 @@ import API from '../utils/api'
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'https://collab-code-editor-mnxl.onrender.com'
 
+// Piston API - 100% free, no key needed
+const PISTON_LANGS = {
+  javascript: { language: "javascript", version: "18.15.0" },
+  typescript: { language: "typescript", version: "5.0.3" },
+  python: { language: "python", version: "3.10.0" },
+  cpp: { language: "cpp", version: "10.2.0" },
+  java: { language: "java", version: "15.0.2" },
+  rust: { language: "rust", version: "1.50.0" },
+  go: { language: "go", version: "1.16.2" },
+  html: null,
+  css: null,
+}
+
 const LANG_META = {
   javascript: { icon: '🟨', label: 'JavaScript' },
   typescript: { icon: '🔷', label: 'TypeScript' },
@@ -76,28 +89,31 @@ function SidePanel({ show, title, onClose, children }) {
           fontSize: 18, lineHeight: 1, padding: '1px 4px'
         }}>×</button>
       </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '10px 10px' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '10px' }}>
         {children}
       </div>
     </div>
   )
 }
 
-function TBtn({ onClick, icon, label, active, danger, disabled }) {
+function TBtn({ onClick, icon, label, active, danger, disabled, highlight }) {
   const [hov, setHov] = useState(false)
   return (
     <button onClick={onClick} disabled={disabled}
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       title={disabled ? 'Owner only' : label}
       style={{
-        background: active ? 'rgba(0,122,204,0.18)' : hov ? 'rgba(255,255,255,0.06)' : 'transparent',
-        border: `1px solid ${active ? '#007acc88' : hov ? '#555' : '#3d3d3d'}`,
-        color: disabled ? '#444' : danger ? (hov ? '#f87171' : '#c0392b88') : active ? '#4da6ff' : hov ? '#ccc' : '#888',
-        padding: '3px 11px', borderRadius: 4, cursor: disabled ? 'not-allowed' : 'pointer',
-        fontSize: 12, display: 'flex', alignItems: 'center', gap: 5, transition: 'all 0.15s',
+        background: highlight ? (hov ? '#1a9e3f' : '#27ae60') : active ? 'rgba(0,122,204,0.18)' : hov ? 'rgba(255,255,255,0.06)' : 'transparent',
+        border: `1px solid ${highlight ? '#27ae60' : active ? '#007acc88' : hov ? '#555' : '#3d3d3d'}`,
+        color: disabled ? '#444' : highlight ? '#fff' : danger ? (hov ? '#f87171' : '#c0392b88') : active ? '#4da6ff' : hov ? '#ccc' : '#888',
+        padding: highlight ? '4px 16px' : '3px 11px',
+        borderRadius: 4, cursor: disabled ? 'not-allowed' : 'pointer',
+        fontSize: highlight ? 13 : 12,
+        fontWeight: highlight ? 700 : 400,
+        display: 'flex', alignItems: 'center', gap: 5, transition: 'all 0.15s',
         flexShrink: 0
       }}>
-      <span style={{ fontSize: 13 }}>{icon}</span>
+      <span style={{ fontSize: highlight ? 14 : 13 }}>{icon}</span>
       <span>{label}</span>
     </button>
   )
@@ -112,7 +128,7 @@ const RoomPage = () => {
   const [language, setLanguage] = useState('javascript')
   const [versions, setVersions] = useState([])
   const [versionMsg, setVersionMsg] = useState('')
-  const [panel, setPanel] = useState('users') // 'users' | 'versions' | null
+  const [panel, setPanel] = useState('users')
   const [roomUsers, setRoomUsers] = useState([])
   const [isOwner, setIsOwner] = useState(false)
   const [ownerId, setOwnerId] = useState(null)
@@ -121,8 +137,18 @@ const RoomPage = () => {
   const [copied, setCopied] = useState(false)
   const [roomName, setRoomName] = useState('')
 
+  // Run code state
+  const [output, setOutput] = useState('')
+  const [running, setRunning] = useState(false)
+  const [showOutput, setShowOutput] = useState(false)
+  const [outputType, setOutputType] = useState('idle') // idle | success | error
+
   const socketRef = useRef(null)
   const codeRef = useRef(code)
+
+  // Fix: backend returns id OR _id depending on mongoose version
+  const myUserId = user?.id || user?._id
+  const myUsername = user?.name
 
   const notify = (msg, type = 'info') => {
     setToast({ msg, type })
@@ -130,7 +156,6 @@ const RoomPage = () => {
   }
 
   useEffect(() => {
-    // WiFi fix: websocket first, auto polling fallback
     socketRef.current = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
       timeout: 20000,
@@ -143,11 +168,13 @@ const RoomPage = () => {
     s.on('disconnect', () => setConnStatus('disconnected'))
     s.on('connect_error', () => setConnStatus('reconnecting…'))
 
-    s.emit('join-room', { roomId, userId: user?.id, username: user?.name })
+    s.emit('join-room', { roomId, userId: myUserId, username: myUsername })
 
     s.on('load-code', ({ code: c, language: l, ownerId: o }) => {
       setCode(c); codeRef.current = c; setLanguage(l)
-      setOwnerId(o); setIsOwner(user?.id === o)
+      setOwnerId(o)
+      const uid = user?.id || user?._id
+      setIsOwner(uid?.toString() === o?.toString())
     })
     s.on('code-update', c => { setCode(c); codeRef.current = c })
     s.on('language-update', l => setLanguage(l))
@@ -156,6 +183,8 @@ const RoomPage = () => {
     s.on('room-deleted', ({ message }) => { notify(message, 'error'); setTimeout(() => navigate('/dashboard'), 2500) })
 
     API.get(`/rooms/${roomId}`).then(r => setRoomName(r.data.name || roomId)).catch(() => {})
+    // Debug: log what user object looks like
+    console.log('User object:', user, 'myUserId:', myUserId)
 
     return () => s.disconnect()
   }, [roomId, user?.id])
@@ -168,6 +197,51 @@ const RoomPage = () => {
   const handleLangChange = l => {
     setLanguage(l)
     socketRef.current?.emit('language-change', { roomId, language: l })
+  }
+
+  // ===== RUN CODE =====
+  const runCode = async () => {
+    const pistonLang = PISTON_LANGS[language]
+    if (!pistonLang) {
+      setOutput(`Cannot run ${language} — HTML/CSS are not executable.`)
+      setOutputType('error')
+      setShowOutput(true)
+      return
+    }
+
+    setRunning(true)
+    setShowOutput(true)
+    setOutput('Running your code...')
+    setOutputType('idle')
+
+    try {
+      const res = await fetch('https://emkc.org/api/v2/piston/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language: pistonLang.language,
+          version: pistonLang.version,
+          files: [{ content: codeRef.current }],
+          stdin: ''
+        })
+      })
+      const result = await res.json()
+      const run = result.run
+      if (run.stderr) {
+        setOutput(run.stderr)
+        setOutputType('error')
+      } else if (run.output) {
+        setOutput(run.output)
+        setOutputType('success')
+      } else {
+        setOutput('(no output — did you forget console.log / print?)')
+        setOutputType('success')
+      }
+    } catch (err) {
+      setOutput('Failed to connect to code runner. Check your internet.\nError: ' + err.message)
+      setOutputType('error')
+    }
+    setRunning(false)
   }
 
   const saveVersion = async () => {
@@ -196,18 +270,18 @@ const RoomPage = () => {
   const kickUser = (socketId, name) => {
     if (!isOwner) return
     if (!confirm(`Remove "${name}" from the room?`)) return
-    socketRef.current?.emit('kick-user', { roomId, targetSocketId: socketId, requesterId: user?.id })
+    socketRef.current?.emit('kick-user', { roomId, targetSocketId: socketId, requesterId: myUserId })
     notify(`${name} removed`, 'info')
   }
 
   const clearCode = () => {
-    if (!isOwner || !confirm('Clear all code for everyone? This cannot be undone.')) return
-    socketRef.current?.emit('clear-code', { roomId, requesterId: user?.id })
+    if (!isOwner || !confirm('Clear all code for everyone?')) return
+    socketRef.current?.emit('clear-code', { roomId, requesterId: myUserId })
   }
 
   const deleteRoom = () => {
     if (!isOwner || !confirm('Permanently delete this room?')) return
-    socketRef.current?.emit('delete-room', { roomId, requesterId: user?.id })
+    socketRef.current?.emit('delete-room', { roomId, requesterId: myUserId })
     navigate('/dashboard')
   }
 
@@ -227,7 +301,7 @@ const RoomPage = () => {
     }}>
       {toast && <Toast msg={toast.msg} type={toast.type} />}
 
-      {/* === TITLE BAR === */}
+      {/* TITLE BAR */}
       <div style={{
         height: 33, background: '#323233', borderBottom: '1px solid #252526',
         display: 'flex', alignItems: 'center', padding: '0 14px',
@@ -251,7 +325,6 @@ const RoomPage = () => {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {/* Stacked avatars */}
           <div style={{ display: 'flex', alignItems: 'center' }}>
             {roomUsers.slice(0, 6).map((u, i) => (
               <div key={u.socketId} style={{ marginLeft: i > 0 ? -8 : 0, zIndex: 10 - i }}>
@@ -282,12 +355,18 @@ const RoomPage = () => {
         </div>
       </div>
 
-      {/* === TOOLBAR === */}
+      {/* TOOLBAR */}
       <div style={{
-        height: 38, background: '#2d2d30', borderBottom: '1px solid #3d3d3d',
+        height: 40, background: '#2d2d30', borderBottom: '1px solid #3d3d3d',
         display: 'flex', alignItems: 'center', padding: '0 12px', gap: 8,
         flexShrink: 0, overflowX: 'auto'
       }}>
+        {/* RUN BUTTON - most prominent */}
+        <TBtn onClick={runCode} icon={running ? '⏳' : '▶'} label={running ? 'Running...' : 'Run Code'}
+          highlight disabled={running} />
+
+        <div style={{ width: 1, background: '#3d3d3d', height: 20 }} />
+
         {/* Language */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingRight: 10, borderRight: '1px solid #3d3d3d' }}>
           <span style={{ fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>Lang</span>
@@ -308,7 +387,7 @@ const RoomPage = () => {
             placeholder="Snapshot message…"
             style={{
               background: '#3c3c3c', border: '1px solid #4a4a4a', color: '#d4d4d4',
-              padding: '3px 10px', borderRadius: 4, fontSize: 12, width: 175, outline: 'none'
+              padding: '3px 10px', borderRadius: 4, fontSize: 12, width: 160, outline: 'none'
             }} />
           <TBtn onClick={saveVersion} icon="💾" label="Save" />
         </div>
@@ -317,7 +396,9 @@ const RoomPage = () => {
         <TBtn onClick={() => togglePanel('users')} icon="👥"
           label={`Users (${roomUsers.length})`} active={panel === 'users'} />
 
-        {/* Owner controls */}
+        {/* Output toggle */}
+        <TBtn onClick={() => setShowOutput(v => !v)} icon="🖥️" label="Output" active={showOutput} />
+
         {isOwner && <>
           <div style={{ width: 1, background: '#3d3d3d', height: 20, marginLeft: 4 }} />
           <TBtn onClick={clearCode} icon="🗑️" label="Clear Code" danger />
@@ -325,50 +406,90 @@ const RoomPage = () => {
         </>}
       </div>
 
-      {/* === MAIN === */}
+      {/* MAIN */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {/* Editor */}
-        <div style={{ flex: 1, overflow: 'hidden' }}>
-          <Editor
-            height="100%"
-            language={language}
-            value={code}
-            theme="vs-dark"
-            onChange={handleCodeChange}
-            options={{
-              fontSize: 14,
-              fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
-              fontLigatures: true,
-              minimap: { enabled: true },
-              scrollBeyondLastLine: false,
-              smoothScrolling: true,
-              cursorSmoothCaretAnimation: 'on',
-              renderLineHighlight: 'all',
-              bracketPairColorization: { enabled: true },
-              padding: { top: 10 },
-              lineHeight: 22,
-              letterSpacing: 0.3,
-              wordWrap: 'on',
-            }}
-          />
+        {/* Editor + Output stacked vertically */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Editor */}
+          <div style={{ flex: showOutput ? '0 0 60%' : 1, overflow: 'hidden', minHeight: 0 }}>
+            <Editor
+              height="100%"
+              language={language}
+              value={code}
+              theme="vs-dark"
+              onChange={handleCodeChange}
+              options={{
+                fontSize: 14,
+                fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+                fontLigatures: true,
+                minimap: { enabled: true },
+                scrollBeyondLastLine: false,
+                smoothScrolling: true,
+                cursorSmoothCaretAnimation: 'on',
+                renderLineHighlight: 'all',
+                bracketPairColorization: { enabled: true },
+                padding: { top: 10 },
+                lineHeight: 22,
+                letterSpacing: 0.3,
+                wordWrap: 'on',
+              }}
+            />
+          </div>
+
+          {/* OUTPUT PANEL */}
+          {showOutput && (
+            <div style={{
+              flex: '0 0 40%', background: '#0d1117', borderTop: '1px solid #3d3d3d',
+              display: 'flex', flexDirection: 'column', minHeight: 0
+            }}>
+              <div style={{
+                height: 30, background: '#161b22', borderBottom: '1px solid #3d3d3d',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '0 12px', flexShrink: 0
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, color: '#8b949e', fontWeight: 600, letterSpacing: 0.8, textTransform: 'uppercase' }}>Output</span>
+                  {outputType === 'success' && <span style={{ fontSize: 10, color: '#3fb950', background: 'rgba(63,185,80,0.1)', padding: '1px 7px', borderRadius: 10, border: '1px solid rgba(63,185,80,0.3)' }}>✓ Success</span>}
+                  {outputType === 'error' && <span style={{ fontSize: 10, color: '#f85149', background: 'rgba(248,81,73,0.1)', padding: '1px 7px', borderRadius: 10, border: '1px solid rgba(248,81,73,0.3)' }}>✗ Error</span>}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => setOutput('')} style={{
+                    background: 'none', border: '1px solid #30363d', color: '#8b949e',
+                    padding: '2px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 10
+                  }}>Clear</button>
+                  <button onClick={() => setShowOutput(false)} style={{
+                    background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 16
+                  }}>×</button>
+                </div>
+              </div>
+              <pre style={{
+                flex: 1, margin: 0, padding: '12px 16px', overflowY: 'auto',
+                fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 13,
+                color: outputType === 'error' ? '#f85149' : outputType === 'success' ? '#e6edf3' : '#8b949e',
+                lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+              }}>
+                {output || 'Click ▶ Run Code to execute your code'}
+              </pre>
+            </div>
+          )}
         </div>
 
-        {/* === USERS PANEL === */}
-        <SidePanel show={panel === 'users'} title="Collaborators" onClose={() => setPanel(null)}>
+        {/* USERS PANEL */}
+        <SidePanel show={panel === 'users'} title={`Collaborators (${roomUsers.length})`} onClose={() => setPanel(null)}>
           {roomUsers.length === 0
             ? <div style={{ color: '#444', fontSize: 12, textAlign: 'center', marginTop: 30 }}>No users connected</div>
             : roomUsers.map(u => (
               <div key={u.socketId} style={{
                 display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
                 borderRadius: 6, marginBottom: 6,
-                background: u.userId === user?.id ? 'rgba(0,122,204,0.08)' : '#2d2d30',
-                border: `1px solid ${u.userId === user?.id ? 'rgba(0,122,204,0.25)' : '#3a3a3a'}`
+                background: u.userId === myUserId ? 'rgba(0,122,204,0.08)' : '#2d2d30',
+                border: `1px solid ${u.userId === myUserId ? 'rgba(0,122,204,0.25)' : '#3a3a3a'}`
               }}>
                 <UserAvatar user={u} size={34} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, color: '#d4d4d4', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 5 }}>
                     {u.username}
-                    {u.userId === user?.id && <span style={{ color: '#555', fontSize: 10 }}>(you)</span>}
+                    {u.userId === myUserId && <span style={{ color: '#555', fontSize: 10 }}>(you)</span>}
                     {u.userId === ownerId && <span style={{ fontSize: 12 }}>👑</span>}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
@@ -376,7 +497,7 @@ const RoomPage = () => {
                     <span style={{ fontSize: 10, color: '#555' }}>online</span>
                   </div>
                 </div>
-                {isOwner && u.userId !== user?.id && (
+                {isOwner && u.userId !== myUserId && (
                   <button onClick={() => kickUser(u.socketId, u.username)} style={{
                     background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)',
                     color: '#f87171', padding: '2px 9px', borderRadius: 4,
@@ -388,10 +509,10 @@ const RoomPage = () => {
           }
         </SidePanel>
 
-        {/* === VERSIONS PANEL === */}
+        {/* VERSIONS PANEL */}
         <SidePanel show={panel === 'versions'} title="Version History" onClose={() => setPanel(null)}>
           {versions.length === 0
-            ? <div style={{ color: '#444', fontSize: 12, textAlign: 'center', marginTop: 30 }}>No saved versions yet.<br /><span style={{ color: '#333' }}>Use "Save" to snapshot your code.</span></div>
+            ? <div style={{ color: '#444', fontSize: 12, textAlign: 'center', marginTop: 30 }}>No saved versions yet.</div>
             : versions.map(v => (
               <div key={v._id} style={{
                 background: '#2d2d30', border: '1px solid #3a3a3a',
@@ -412,7 +533,7 @@ const RoomPage = () => {
         </SidePanel>
       </div>
 
-      {/* === STATUS BAR === */}
+      {/* STATUS BAR */}
       <div style={{
         height: 22, background: '#007acc', display: 'flex', alignItems: 'center',
         justifyContent: 'space-between', padding: '0 14px', fontSize: 11,
