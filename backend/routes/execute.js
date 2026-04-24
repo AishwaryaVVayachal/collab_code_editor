@@ -1,41 +1,67 @@
 const express = require('express')
 const router = express.Router()
 
-const PISTON_LANGS = {
-  javascript: { language: 'javascript', version: '18.15.0' },
-  typescript: { language: 'typescript', version: '5.0.3' },
-  python: { language: 'python', version: '3.10.0' },
-  cpp: { language: 'cpp', version: '10.2.0' },
-  java: { language: 'java', version: '15.0.2' },
-  rust: { language: 'rust', version: '1.50.0' },
-  go: { language: 'go', version: '1.16.2' },
+// Judge0 CE - free public instance, no key needed
+const JUDGE0_URL = 'https://ce.judge0.com'
+
+const LANG_IDS = {
+  javascript: 63,
+  typescript: 74,
+  python: 71,
+  cpp: 54,
+  java: 62,
+  rust: 73,
+  go: 60,
 }
 
 router.post('/', async (req, res) => {
   const { code, language } = req.body
-  const lang = PISTON_LANGS[language]
-  if (!lang) return res.status(400).json({ error: `Language "${language}" not supported.` })
+  const langId = LANG_IDS[language]
+
+  if (!langId) {
+    return res.status(400).json({ error: `Language "${language}" not supported.` })
+  }
 
   try {
-    const response = await fetch('https://emkc.org/api/v2/piston/execute', {
+    // Submit code
+    const submitRes = await fetch(`${JUDGE0_URL}/submissions?base64_encoded=false&wait=true`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Auth-Token': 'guest'
+      },
       body: JSON.stringify({
-        language: lang.language,
-        version: lang.version,
-        files: [{ content: code }],
-        stdin: ''
+        source_code: code,
+        language_id: langId,
+        stdin: '',
       })
     })
-    const text = await response.text()
-    console.log('Piston response:', text.substring(0, 300))
+
+    const text = await submitRes.text()
+    console.log('Judge0 response:', text.substring(0, 300))
+
     let data
-    try { data = JSON.parse(text) } catch { return res.status(500).json({ error: 'Piston invalid JSON: ' + text }) }
-    const run = data?.run
-    if (!run) return res.status(500).json({ error: 'No run field. Got: ' + JSON.stringify(data).substring(0, 200) })
-    return res.json({ output: run.output || run.stdout || '', stderr: run.stderr || '', exitCode: run.code ?? 0 })
+    try { data = JSON.parse(text) } catch {
+      return res.status(500).json({ error: 'Invalid response: ' + text.substring(0, 100) })
+    }
+
+    const output = data.stdout || ''
+    const stderr = data.stderr || data.compile_output || ''
+    const error = data.message || ''
+
+    if (error && !output && !stderr) {
+      return res.status(500).json({ error })
+    }
+
+    return res.json({
+      output: output,
+      stderr: stderr,
+      exitCode: data.exit_code ?? 0
+    })
+
   } catch (err) {
-    return res.status(500).json({ error: 'Piston fetch failed: ' + err.message })
+    console.error('Execute error:', err.message)
+    return res.status(500).json({ error: 'Failed to reach code runner: ' + err.message })
   }
 })
 
